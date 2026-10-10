@@ -1,0 +1,2 @@
+# planta-ia
+analisa plantas
