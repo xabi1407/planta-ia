@@ -1,0 +1,233 @@
+!pip install -q gradio transformers torch pillow
+
+
+import torch
+import gradio as gr
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+from PIL import Image
+import unicodedata
+
+# ==========================================
+#                 PLANTAI
+# ==========================================
+
+MODELO_PLANTAS = (
+    "domai-tb/OpenPlants-Identification-ViT-Base-Patch16-224"
+)
+
+dispositivo = "cuda" if torch.cuda.is_available() else "cpu"
+
+print("Cargando modelo PlantAI...")
+
+procesador = AutoImageProcessor.from_pretrained(MODELO_PLANTAS)
+
+modelo = AutoModelForImageClassification.from_pretrained(
+    MODELO_PLANTAS
+).to(dispositivo)
+
+modelo.eval()
+
+print("Modelo cargado correctamente.")
+
+
+# ==========================================
+#       TRADUCCIÓN A NOMBRES COMUNES
+# ==========================================
+
+def normalizar(texto):
+    texto = unicodedata.normalize("NFKD", str(texto).lower())
+    return "".join(
+        letra for letra in texto
+        if not unicodedata.combining(letra)
+    ).replace("_", " ").replace("-", " ")
+
+
+def identificar_nombre_comun(etiqueta):
+    texto = normalizar(etiqueta)
+
+    equivalencias = [
+        (["coriandrum sativum", "cilantro", "coriander"],
+         "Cilantro", "Coriandrum sativum"),
+
+        (["petroselinum crispum", "perejil", "parsley"],
+         "Perejil", "Petroselinum crispum"),
+
+        (["ocimum basilicum", "basil", "albahaca"],
+         "Albahaca", "Ocimum basilicum"),
+
+        (["mentha", "mint", "menta"],
+         "Menta", "Mentha"),
+
+        (["rosa", "rose"],
+         "Rosa", "Rosa"),
+
+        (["lavandula", "lavender", "lavanda"],
+         "Lavanda", "Lavandula"),
+
+        (["solanum lycopersicum", "tomato", "tomate"],
+         "Tomate", "Solanum lycopersicum"),
+
+        (["helianthus annuus", "sunflower", "girasol"],
+         "Girasol", "Helianthus annuus"),
+
+        (["aloe vera"],
+         "Sábila", "Aloe vera"),
+
+        (["mangifera indica", "mango"],
+         "Mango", "Mangifera indica"),
+
+        (["citrus limon", "lemon", "limon"],
+         "Limón", "Citrus limon"),
+
+        (["zea mays", "corn", "maiz"],
+         "Maíz", "Zea mays"),
+
+        (["origanum vulgare", "oregano", "oregano"],
+         "Orégano", "Origanum vulgare"),
+    ]
+
+    for alias, comun, cientifico in equivalencias:
+        if any(normalizar(nombre) in texto for nombre in alias):
+            return comun, cientifico
+
+    # Si no hay traducción conocida, no inventamos el nombre.
+    return "Nombre común no disponible", etiqueta
+
+
+# ==========================================
+#           ANÁLISIS DE LA IMAGEN
+# ==========================================
+
+def analizar_planta(imagen):
+    if imagen is None:
+        return None, "⚠️ **Selecciona primero una imagen.**"
+
+    imagen = imagen.convert("RGB")
+
+    entradas = procesador(
+        images=imagen,
+        return_tensors="pt"
+    )
+
+    entradas = {
+        clave: valor.to(dispositivo)
+        for clave, valor in entradas.items()
+    }
+
+    with torch.no_grad():
+        salida = modelo(**entradas)
+        probabilidades = torch.softmax(
+            salida.logits, dim=-1
+        )[0]
+
+    cantidad = min(5, len(probabilidades))
+    valores, indices = torch.topk(probabilidades, cantidad)
+
+    etiqueta = modelo.config.id2label.get(
+        indices[0].item(), "Planta desconocida"
+    )
+
+    nombre_comun, nombre_cientifico = identificar_nombre_comun(
+        etiqueta
+    )
+
+    confianza = valores[0].item() * 100
+
+    if nombre_comun == "Nombre común no disponible":
+        nombre_mostrar = (
+            "No se pudo traducir automáticamente la etiqueta "
+            "del modelo a un nombre común."
+        )
+    else:
+        nombre_mostrar = f"**{nombre_comun}**"
+
+    resultado = f"""
+# 🌿 Resultado de PlantAI
+
+### Nombre común
+{nombre_mostrar}
+
+### Nombre científico
+*{nombre_cientifico}*
+
+### Confianza del modelo
+**{confianza:.2f}%**
+
+---
+
+## 🔎 Las 5 predicciones principales
+"""
+
+    for valor, indice in zip(valores, indices):
+        etiqueta_top = modelo.config.id2label.get(
+            indice.item(), str(indice.item())
+        )
+
+        comun_top, cientifico_top = identificar_nombre_comun(
+            etiqueta_top
+        )
+
+        resultado += (
+            f"\n- **{comun_top}** — {cientifico_top}: "
+            f"{valor.item() * 100:.2f}%"
+        )
+
+    resultado += """
+
+---
+
+**Importante:** la confianza es una puntuación del modelo, no
+una garantía de que la identificación sea correcta.
+"""
+
+    return imagen, resultado
+
+
+# ==========================================
+#            INTERFAZ WEB
+# ==========================================
+
+with gr.Blocks(theme=gr.themes.Soft(), title="PlantAI") as app:
+
+    gr.Markdown("""
+    # 🌿 PlantAI
+    ### Identificador inteligente de plantas
+
+    Sube una fotografía y descubre qué planta podría ser.
+    """)
+
+    with gr.Row():
+        with gr.Column():
+            entrada_imagen = gr.Image(
+                label="📷 Selecciona una fotografía",
+                type="pil"
+            )
+
+            boton = gr.Button(
+                "🔍 Analizar planta",
+                variant="primary"
+            )
+
+        with gr.Column():
+            imagen_resultado = gr.Image(
+                label="Imagen analizada",
+                type="pil"
+            )
+
+            texto_resultado = gr.Markdown(
+                "Aquí aparecerán el nombre y los datos de la planta."
+            )
+
+    boton.click(
+        fn=analizar_planta,
+        inputs=entrada_imagen,
+        outputs=[imagen_resultado, texto_resultado]
+    )
+
+    gr.Markdown("""
+    ---
+    **PlantAI** · Los resultados dependen de las clases
+    que conoce el modelo de inteligencia artificial.
+    """)
+
+app.launch(share=True, debug=True)
